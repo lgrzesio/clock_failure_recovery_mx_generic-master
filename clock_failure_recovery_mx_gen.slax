@@ -1,0 +1,553 @@
+/*
+Copyright 2020 Juniper Networks, Inc. All rights reserved.
+Licensed under the Juniper Networks Script Software License (the "License").
+You may not use this script file except in compliance with the License, which is located at
+http://www.juniper.net/support/legal/scriptlicense/
+Unless required by applicable law or otherwise agreed to in writing by the parties,
+software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES
+ OR CONDITIONS OF ANY KIND, either express or implied.
+
+Version 1.0
+2020-09-12
+Author nfujita
+Target Platform MX240/480/960,MX2010/MX2020
+
+- Description
+ This script reacts against 19.44Mhz central clock failure issue.
+ For POST PR1463169 Junos version, the script reacts agaist CHASSISD_CB_19MHZ_CLK_FAIL
+ Once the alam is generated and JUNOS performes RE switchover, the script switch 19.4Mhz clock selecton on AgentSmith boards.
+  NOTE1: AS board will be reverted to default behavior upon subsequent FPC reboot. Please replace old master CB as soon as possible.
+
+ For PRE PR1463169 Junos version,
+ Once the error is detected, the script performs manual clock switchover on AgentSmith boards then perform RE switchover.
+ NOTE: AS board will be reverted to default behavior upon subsequent FPC reboot. Please replace old master CB as soon as possible.
+ 
+ For POST PR1433948 Junos version, the script does nothing as Junos does perform clock switchover on AS board automatically.
+
+
+- Installation;
+ - Copy this file as /var/db/scripts/event/clock_failure_recovery_mx_gen.slax under both REs.
+
+ - Configuration.
+set event-options event-script file clock_failure_recovery_mx_gen.slax
+
+ - Recommended optional configuration
+set event-options event-script optional
+set system scripts synchronize
+
+ - For MX480/960, to artificially trigger the clock failure for lab testing (requires root shell access. )
+   NOTE: This way doesn't work on MX240
+ To set clock alarm
+  #spc -w 0 0 0x38 0x85 ; spc -w 0 0 0x39 0xa
+ To clear clock alarm
+  #spc -w 0 0 0x38 0x7e; spc -w 0 0 0x39 0x9
+  
+- For MZ2010/20120, to artificially trigger the clock failure for lab testing (requires root shell access.  
+ To set clock alarm
+  #spc -w 0 0 0x38 0x85 ; spc -w 0 0 0x39 0xa;spc -w 0 0 0x60 0xa0
+ To clear clock alarm
+  #spc -w 0 0 0x38 0x7e; spc -w 0 0 0x39 0x9;spc -w 0 0 0x60 0xa1
+  
+
+*/
+
+version 1.1;
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ns str = "http://exslt.org/strings";
+ns bit extension = "http://xml.libslax.org/bit";
+
+import "../import/junos.xsl";
+
+var $arguments = {
+  <argument> {
+    <name> "postfpcreboot";
+    <description> "true to kick the logic that AS board prefers master CB";
+  }
+}
+param $postfpcreboot="false";
+
+var $con = jcs:open();
+
+var $rpc-sh-ver = {<get-software-information>;}
+var $res-sh-ver = jcs:execute($con,$rpc-sh-ver);
+var $junos-ver-str = jcs:regex("^([0-9]+)\.[0-9]+",$res-sh-ver//junos-version);
+var $os-ver = $junos-ver-str[2];
+var $hwdbfile = "/tmp/clock_failure_recovery_mx_gen.hwdb.xml";
+
+var $event-definition = {
+  <event-options> {
+    <policy> {
+      <name>"clock_failure_recovery_mx_gen";
+      <events>"SYSTEM";
+      <within> {
+        <name>"30";
+        <trigger> {
+          <on>;
+          <count>"1";
+        }
+      }
+      <attributes-match> {
+        <from-event-attribute>"SYSTEM.message";
+        <condition>"matches";
+        <to-event-attribute-value>"Major alarm set, CB [0-1] 19.44 MHz clock failure";
+      }
+      <then> {
+        <event-script> {
+          <name>"clock_failure_recovery_mx_gen.slax";
+        }
+      }
+    }
+    <policy> {
+      <name>"clock_failure_recovery_mx_gen_post_PR1463169";
+      <events>"CHASSISD_CB_19MHZ_CLK_FAIL";
+      <within> {
+        <name>"30";
+        <trigger> {
+          <on>;
+          <count>"1";
+        }
+      }
+      <then> {
+        <event-script> {
+          <name>"clock_failure_recovery_mx_gen.slax";
+        }
+      }
+    }
+    <policy> {
+      <name>"clock_failure_recovery_mx_gen_extra";
+      <events>"PIC";
+      <within> {
+        <name>"65";
+        <trigger>{
+          <on>;
+          <count>"1";
+        }
+      }
+      <attributes-match> {
+        <from-event-attribute>"PIC.message";
+        <condition>"matches";
+        <to-event-attribute-value>"Send PFE-rsync-ack to kernel";
+      }
+      <then> {
+        <event-script> {
+          <name>"clock_failure_recovery_mx_gen.slax";
+          <arguments> {
+            <name>"postfpcreboot";
+              <value>"true";
+          }
+        }
+      }
+    }
+    <generate-event> {
+      <name>"clock_failure_recovery_mx_gen_timer";
+      <time-interval>"86400";
+    }
+    <policy> {
+      <name>"clock_failure_recovery_mx_gen_periodic";
+      <events>"clock_failure_recovery_mx_gen_timer";
+      <then> {
+        <event-script> {
+          <name>"clock_failure_recovery_mx_gen.slax";
+          <arguments> {
+            <name>"postfpcreboot";
+              <value>"true";
+          }
+        }
+      }
+    }
+  }
+}
+
+template has_pr1463169(){
+  var $rpc= {
+    <get-syslog-tag-information> {
+      <syslog-tag>"CHASSISD_CB_19MHZ_CLK_FAIL";
+    }
+  }
+  var $res=jcs:execute($con,$rpc);
+  if (jcs:empty($res//syslog-tag)) {
+    expr "FALSE";
+  } else {
+    expr "TRUE";
+  }
+}
+
+template allfpcs-post-pr1463169($clock-preference) {
+  var $rpc-sh-tnp=<command> "show tnp address";
+  var $res-sh-tnp=jcs:break-lines(jcs:execute($con,$rpc-sh-tnp));
+  var $cacheexist = jcs:execute($con, <command>"file list " _ $hwdbfile);
+  if ($cacheexist//file-information) {
+    var $res-sh-chas = document($hwdbfile);
+    for-each ($res-sh-tnp) {
+      var $line=jcs:regex("fpc([0-9])+ +0x",.);
+      if (not(jcs:empty($line))) {
+        var $fpcslot=$line[2];
+        if (
+          ($res-sh-chas//chassis-module[name == "FPC " _ $fpcslot]/description =="MPC 3D 16x 10GE")
+            or
+          ($res-sh-chas//chassis-module[name == "FPC " _ $fpcslot]/description =="MPCE 3D 16x 10GE")
+        ){
+          call switchclk($fpcslot=$fpcslot,$cbslot=$clock-preference);
+          var $msg= $script _ ": performing clock switchover on FPC slot " _ $fpcslot _ ".";
+          expr jcs:syslog("daemon.notice",$msg);
+        }
+      }
+    }
+  } else {  /* cache does not exist yet. falling back to slower method (this unlikely happens in production)*/
+    for-each ($res-sh-tnp) {
+      var $line=jcs:regex("fpc([0-9])+ +0x",.);
+      if (not(jcs:empty($line))) {
+        var $fpcslot=$line[2];
+        var $is-as-board = {call isasboard($fpcslot=$fpcslot);}
+        if ($is-as-board=="true") {
+          call switchclk($fpcslot=$fpcslot,$cbslot=$clock-preference);
+          var $msg= $script _ ": performing clock switchover on FPC slot " _ $fpcslot _ ".";
+          expr jcs:syslog("daemon.notice",$msg);
+        }
+      }
+    }
+  }
+}
+    
+template allfpcs($clock-preference) {
+  var $res-sh-fpc=jcs:execute($con,"get-fpc-information");
+  var $res-sh-chas=jcs:execute($con,"get-chassis-inventory");
+  var $max-fpc=jcs:sysctl("hw.product.chassis_max_fpc_slots","i");
+  for $fpcslot(0 ... $max-fpc) {
+    if (($res-sh-fpc//fpc[slot == $fpcslot]/state == "Online") and
+    (($res-sh-chas//chassis/chassis-module[name == "FPC " _ $fpcslot]/description =="MPC 3D 16x 10GE")
+      or
+      ($res-sh-chas//chassis/chassis-module[name == "FPC " _ $fpcslot]/description =="MPCE 3D 16x 10GE")
+    )) {
+      call switchclk($fpcslot=$fpcslot,$cbslot=$clock-preference);
+      var $msg= $script _ ": performing clock switchover on FPC slot " _ $fpcslot _ ".";
+      expr jcs:syslog("daemon.notice",$msg);
+    } 
+  }
+}
+
+template isasboard($fpcslot) {
+  var $rpc = {
+    <request-pfe-execute> {
+      <target>"fpc" _ $fpcslot;
+      <command>"show ideeprom dpc";
+      <timeout>"0";
+    }
+  }
+  var $res=jcs:break-lines(jcs:execute($con,$rpc));
+  var $assm-id = {
+    for-each($res) {
+      var $line=jcs:regex("Assembly ID : (0x[0-9a-f]+)",.);
+      if (not(jcs:empty($line))) {
+        expr $line[2];
+      }
+    }
+  }
+   /*
+    "MPC 3D 16x 10GE",   0x0997 
+    "MPC 3D 16x10GE 4G", 0x0B1E
+    "MPCE 3D 16x 10GE",  0x0B07 
+    */
+  if (($assm-id == "0x0b1e") || ($assm-id == "0x0b07") || ($assm-id == "0x0997")) {
+    expr "true";
+  } else {
+    expr "false";
+  }
+}
+
+template ispost_pr1433948() {
+  var $rpc = {
+    <request-shell-execute> {
+      <command>"grep 'Failed to init TX CLK, incorrect master re slot' /usr/share/pfe/npc.jbf";
+    }
+  }
+  var $res = jcs:execute($con,$rpc);
+  if (jcs:regex("Binary file .* matches",$res)) {
+    expr "true";
+  } else {
+    expr "false";
+  }
+}
+
+template switchclk($fpcslot,$cbslot) {
+  var $newval := {
+    if ($cbslot == 0 ) {
+      <reg1> "0xe4";
+      <reg3tmp> "0x5";
+      <reg3> "0x5";
+      <reg4tmp> "0x12";
+      <reg4> "0x92";
+    } else if ($cbslot == 1) {
+      <reg1> "0xe1";
+      <reg3tmp> "0x45";
+      <reg3> "0x5";
+      <reg4tmp> "0x12";
+      <reg4> "0x92";
+    }
+  }
+  if ($os-ver >= 15) {
+    var $rpc-mod-si53xx-tmp = {
+      <request-pfe-execute> {
+        <target>"fpc" _ $fpcslot;
+        <command>"set si53xx 0x4c 0x68 register 1 " _ $newval/reg1;
+        <command>"set si53xx 0x4c 0x68 register 3 " _ $newval/reg3tmp;
+        <command>"set si53xx 0x4c 0x68 register 4 " _ $newval/reg4tmp;
+        <timeout>0;
+      }
+    }
+    expr jcs:execute($con,$rpc-mod-si53xx-tmp);
+    expr jcs:sleep(0,200);
+    var $rpc-mod-si53xx = {
+      <request-pfe-execute> {
+        <target>"fpc" _ $fpcslot;
+        <command>"set si53xx 0x4c 0x68 register 1 " _ $newval/reg1;
+        <command>"set si53xx 0x4c 0x68 register 3 " _ $newval/reg3;
+        <command>"set si53xx 0x4c 0x68 register 4 " _ $newval/reg4;
+        <timeout>0;
+      }
+    }
+    expr jcs:execute($con,$rpc-mod-si53xx);
+  } else {  /* older junos,this takes 6 seconds */
+    var $rpc-mod-si53xx = {
+      <request-pfe-execute> {
+        <target>"fpc" _ $fpcslot;
+        <command>"set si53xx 0x4c 0x68 register 1 " _ $newval/reg1;
+        <command>"set si53xx 0x4c 0x68 register 3 " _ $newval/reg3tmp;
+        <command>"set si53xx 0x4c 0x68 register 4 " _ $newval/reg4tmp;
+        <command>"sleep 1";
+        <command>"set si53xx 0x4c 0x68 register 1  " _ $newval/reg1;
+        <command>"set si53xx 0x4c 0x68 register 3  " _ $newval/reg3;
+        <command>"set si53xx 0x4c 0x68 register 4  " _ $newval/reg4;
+      }
+    }
+    expr jcs:execute($con,$rpc-mod-si53xx);
+  }
+}
+
+template allfpcs-graceful-post-pr1463169($clock-preference) {
+  var $res-sh-fpc=jcs:execute($con,"get-fpc-information");
+  var $res-sh-chas=jcs:execute($con,"get-chassis-inventory");
+  var $res-sh-chas-out := {
+    <chassis>{
+      for-each($res-sh-chas//chassis/chassis-module[starts-with(name,"FPC")]) {
+        <chassis-module> {
+          <name> ./name;
+          <description>./description;
+        }
+      }
+    }
+  }
+  if ($res-sh-chas-out//chassis-module) {
+    <xsl:document href=$hwdbfile indent="yes"> {
+      copy-of $res-sh-chas-out;
+    }
+  }  
+  var $max-fpc=jcs:sysctl("hw.product.chassis_max_fpc_slots","i");
+  for $fpcslot(0 ... $max-fpc) {
+    if (($res-sh-fpc//fpc[slot == $fpcslot]/state == "Online") and
+      (
+      ($res-sh-chas//chassis/chassis-module[name == "FPC " _ $fpcslot]/description =="MPC 3D 16x 10GE")
+      or
+      ($res-sh-chas//chassis/chassis-module[name == "FPC " _ $fpcslot]/description =="MPCE 3D 16x 10GE")
+      )) {
+      var $state_pre := {call chkclk($fpcslot=$fpcslot);}
+      if ($state_pre/clock/configured != $clock-preference ) {
+        call switchclk-graceful($fpcslot=$fpcslot,$cbslot=$clock-preference);
+      }
+      expr jcs:sleep(0,200);
+      var $state_post := {call chkclk($fpcslot=$fpcslot);}
+      if ($state_post/clock/current != $clock-preference ) {
+        call switchclk($fpcslot=$fpcslot,$cbslot=$clock-preference);
+      }
+    }
+  }
+}
+
+template allfpcs-graceful($clock-preference) {
+  var $res-sh-fpc=jcs:execute($con,"get-fpc-information");
+  var $res-sh-chas=jcs:execute($con,"get-chassis-inventory");
+  var $max-fpc=jcs:sysctl("hw.product.chassis_max_fpc_slots","i");
+  for $fpcslot(0 ... $max-fpc) {
+    if (($res-sh-fpc//fpc[slot == $fpcslot]/state == "Online") and
+      (
+      ($res-sh-chas//chassis/chassis-module[name == "FPC " _ $fpcslot]/description =="MPC 3D 16x 10GE")
+      or
+      ($res-sh-chas//chassis/chassis-module[name == "FPC " _ $fpcslot]/description =="MPCE 3D 16x 10GE")
+      )) {
+      var $state_pre := {call chkclk($fpcslot=$fpcslot);}
+      if ($state_pre/clock/configured != $clock-preference ) {
+        call switchclk-graceful($fpcslot=$fpcslot,$cbslot=$clock-preference);
+      }
+      expr jcs:sleep(0,200);
+      var $state_post := {call chkclk($fpcslot=$fpcslot);}
+      if ($state_post/clock/current != $clock-preference ) {
+        call switchclk($fpcslot=$fpcslot,$cbslot=$clock-preference);
+      }
+    }
+  }
+}
+
+template switchclk-graceful($fpcslot,$cbslot) {
+  var $newval := {
+    if ($cbslot == 0 ) {
+      <reg1> "0xe4";
+    } else if ($cbslot == 1) {
+      <reg1> "0xe1";
+    }
+  }
+  var $rpc-mod-si53xx = {
+    <request-pfe-execute> {
+      <target>"fpc" _ $fpcslot;
+      <command>"set si53xx 0x4c 0x68 register 1 " _ $newval/reg1;
+      if ($os-ver >= 15) {
+        <timeout>0;
+      }
+    }
+  }
+  expr jcs:execute($con,$rpc-mod-si53xx);
+}
+
+template chkclk($fpcslot) {
+  var $rpc-chk-si53xx = {
+    <request-pfe-execute> {
+      <target>"fpc" _ $fpcslot;
+      <command>"sh si53xx 0x4c 0x68 si5326";
+      if ($os-ver >= 15) {
+        <timeout>0;
+      }
+    }
+  }
+  var $res=jcs:break-lines(jcs:execute($con,$rpc-chk-si53xx));
+  var $reg := {
+    for-each($res) {
+      var $line = jcs:regex("([0-9]+).+:.+(0x *[0-9a-f]+)",.);
+      if ($line[2]=="1") {
+        <reg1>$line[3];
+      }
+      if ($line[2]=="128") {
+        <reg128>$line[3];
+      }
+      if ($line[2]=="129") {
+        <reg129>$line[3];
+      }
+    }
+  }
+  var $configured = {
+    if ($reg/reg1 == "0xe4") {
+      expr 0;
+    } else if ($reg/reg1 == "0xe1") {
+      expr 1;
+    } else {
+      expr "invalid";
+    }
+  }
+  var $current = {
+    if ($reg/reg128 == "0x 1") {
+      expr 0;
+    } else if ($reg/reg128 == "0x 2") {
+      expr 1;
+    } else {
+      expr "invalid";
+    }
+  }
+  var $clkstat := {
+    var $hexval=str:replace($reg/reg129," ","");
+    var $binval=bit:from-hex($hexval,8);
+    var $cb0clk=bit:to-int(bit:and("00000010",$binval));
+    var $cb1clk=bit:to-int(bit:and("00000100",$binval));
+    if ($cb0clk > 0 ) {
+      <cb0clk>"LOS";
+    } else {
+      <cb0clk>"Normal";
+    }
+    if ($cb1clk > 0 ) {
+      <cb1clk>"LOS";
+    } else {
+      <cb1clk>"Normal";
+    }
+  }
+  <clock> {
+    <configured>$configured;
+    <current>$current; 
+    <cb0>$clkstat/cb0clk;
+    <cb1>$clkstat/cb1clk;
+  }
+}
+
+template snmp_trap ($msg) {
+  var $trap-msg = str:replace( $msg, " ", "\\ " );
+  var $request-trap-rpc = { <command> "request snmp spoof-trap jnxEventTrap variable-bindings "
+                           _ "jnxEventTrapDescr[0]=Event-trap,"
+                           _ "jnxEventAvAttribute[1]=message,"
+                           _ "jnxEventAvValue[1]=\"" _ $trap-msg _ "\"";
+  }
+  expr jcs:execute($con,$request-trap-rpc);
+}
+
+match / {
+  <op-script-result> {
+    var $post-pr1433948 = {call ispost_pr1433948();}
+    if ($post-pr1433948 == "true") {
+      expr jcs:syslog("daemon.notice",$script 
+            _ ":This router has the fix of pr1433948 already. This script is no longer required. Please remove the configuration");
+      <xsl:message terminate="yes"> "This router has the fix of pr1433948 already.";
+    }
+    var $post-pr1463169 = {call has_pr1463169();}
+    if ($post-pr1463169 == "TRUE") {     /* for POST PR143169. RE switchover upon clock failure will be done by JUNOS itself */
+      if ($postfpcreboot == "false"){      /* this section will be invoked upon clock failure detection */
+        expr jcs:dampen("clock_failure_recovery_mx_gen.slax", 1, 2 );
+        var $re-slotid=jcs:sysctl("hw.re.slotid","i");
+        var $ore-slotid=($re-slotid + 1 ) mod 2;
+        var $msg= $script _ ": 19.44Mhz Clock failure has been detected on CB" _  $re-slotid 
+                  _ ", triggering clock switchover on 'MPC 3D 16x 10GE' boards.";
+        expr jcs:syslog("daemon.error",$msg);
+        call snmp_trap($msg=$msg);
+        expr jcs:sleep(2);
+        call allfpcs-post-pr1463169($clock-preference=$ore-slotid);     /* reprogramming clock setting in AS boards. This should happen post RE switchover*/
+      } else if (($postfpcreboot == "true") && ($junos-context/re-master)) { /* this section will be invoked upon FPC reboot, and in periodic checking */
+        if (not(jcs:dampen( "clock_failure_recovery_mx_gen.slax", 1, 2 ))) {
+          <xsl:message terminate="yes"> "Conflicting with event driven execution. bailing out";
+        } else {
+          expr jcs:sleep(60);
+          var $re-slotid=jcs:sysctl("hw.re.slotid","i");
+          call allfpcs-graceful-post-pr1463169($clock-preference=$re-slotid);  /* checking all AS boards and reprogram clock setting if it is not done yet */
+        }
+      }
+    } else {                               /* for PRE PR143169 RE switchover upon clock failure will be done by this script*/
+      if ($junos-context/re-master) {
+        if ($postfpcreboot == "false") {     /* this section will be invoked upon clock failure detection */
+          expr jcs:dampen("clock_failure_recovery_mx_gen.slax", 1, 2 );
+          var $re-slotid=jcs:sysctl("hw.re.slotid","i");
+          var $ore-alive=jcs:sysctl("hw.ore.alive","i");
+          if ( $ore-alive == 1 ) {
+            var $ore-slotid=($re-slotid + 1 ) mod 2;
+            var $msg= $script _ ": 19.44Mhz Clock failure has been detected on CB" _  $re-slotid 
+                      _ ", triggering clock switchover on 'MPC 3D 16x 10GE' boards and performing RE switchover as remedy action.";
+            expr jcs:syslog("daemon.error",$msg);
+            call snmp_trap($msg=$msg);
+            call allfpcs($clock-preference=$ore-slotid);        /* reprogramming clock setting in AS boards. */
+            var $rpc-switch= {
+              <command> "request chassis routing-engine master switch no-confirm";
+            }
+            expr jcs:execute($con,$rpc-switch);                 /* Performing GRES switchover */
+          } else {                                    /* in the case that backup RE is not GRES ready state. We can't switch the mastership */
+            var $msg= $script _ ": 19.44Mhz Clock failure has been detected on CB" 
+                _ $re-slotid _ ", but remedy action couldn't be taken because backup RE/CB was not ready.";
+            expr jcs:syslog("daemon.error",$msg);
+            call snmp_trap($msg=$msg);
+          }
+        } else if ($postfpcreboot == "true")  {    /* this section will be invoked upon FPC reboot, and in periodic checking */
+          if (not(jcs:dampen( "clock_failure_recovery_mx_gen.slax", 1, 2 ))) {
+            <xsl:message terminate="yes"> "Conflicting with event driven execution. bailing out";
+          } else {
+            expr jcs:sleep(60);
+            var $re-slotid=jcs:sysctl("hw.re.slotid","i");
+            call allfpcs-graceful($clock-preference=$re-slotid);   /* checking all AS boards and reprogram clock setting if it is not done yet */
+          }
+        }
+      }
+    }
+  }
+}
